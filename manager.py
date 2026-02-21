@@ -229,10 +229,8 @@ class FlyTheWPlugin(BasePlugin):
             x1 = w - w1 - 1
             x2 = w - w2 - 1
 
-            # Vertically center the two lines in the lower half
-            total_h = self.font_size * 2 + 2
-            y1 = (h - total_h) // 2
-            y2 = y1 + self.font_size + 2
+            y1 = 1
+            y2 = self.font_size + 2
 
             # Black shadow
             self._draw_small_text(draw, line1, x1 + 1, y1 + 1, BLACK)
