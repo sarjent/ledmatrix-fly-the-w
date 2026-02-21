@@ -174,12 +174,14 @@ class FlyTheWPlugin(BasePlugin):
                 # Convert palette/transparency to RGBA so resize is clean
                 frame_rgba = raw_frame.convert("RGBA")
 
-                # Stretch to fill the full area below the banner (no letterboxing)
-                frame_resized = frame_rgba.resize((w, gif_area_h), Image.Resampling.LANCZOS)
+                # Scale to fit the GIF area only (letterbox)
+                frame_rgba.thumbnail((w, gif_area_h), Image.Resampling.LANCZOS)
 
                 # Black canvas for full display; paste GIF flush against the banner
                 canvas = Image.new("RGB", (w, h), BLACK)
-                canvas.paste(frame_resized, (0, banner_h), frame_resized)
+                paste_x = (w - frame_rgba.width) // 2
+                paste_y = banner_h              # immediately below the banner
+                canvas.paste(frame_rgba, (paste_x, paste_y), frame_rgba)
 
                 frames.append(canvas)
 
