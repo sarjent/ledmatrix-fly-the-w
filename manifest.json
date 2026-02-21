@@ -19,7 +19,7 @@
     "fly_the_w"
   ],
   "update_interval": 300,
-  "default_duration": 30,
+  "default_duration": 10,
   "requires": {
     "python": ">=3.9"
   },

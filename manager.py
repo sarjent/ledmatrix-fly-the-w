@@ -77,14 +77,23 @@ class FlyTheWPlugin(BasePlugin):
         # Win state
         self.celebrating: bool = False
         self.win_expires_at: Optional[datetime] = None
-        self.last_win_score: str = ""          # e.g. "CHC 5, MIL 3"
+        self.last_win_score: str = ""
         self.last_update: Optional[datetime] = None
+        self._win_info: Dict[str, Any] = {}        # cubs_abbr, opp_abbr, cubs_score, opp_score
+
+        # Live-priority: fires once per new win, then lets normal rotation take over
+        self._live_priority_fired: bool = False
 
         # Animation state
         self._frames: List[Image.Image] = []
         self._frame_durations: List[float] = []   # per-frame delay in seconds
         self._frame_index: int = 0
         self._last_frame_time: float = 0.0
+
+        # Flash state for "CUBS WIN!" text
+        self._flash_on: bool = True
+        self._flash_last_toggle: float = 0.0
+        self._flash_period: float = 0.5           # seconds between flashes
 
         # Build animation frames once during init
         self._build_frames()
@@ -167,9 +176,6 @@ class FlyTheWPlugin(BasePlugin):
                 paste_y = (h - frame_rgba.height) // 2
                 canvas.paste(frame_rgba, (paste_x, paste_y), frame_rgba)
 
-                # Overlay score / text if configured
-                self._add_overlays(canvas)
-
                 frames.append(canvas)
 
             if not frames:
@@ -187,20 +193,53 @@ class FlyTheWPlugin(BasePlugin):
             self.logger.error("Error loading GIF: %s", exc, exc_info=True)
             return False
 
-    def _add_overlays(self, img: Image.Image) -> None:
-        """Composite 'CUBS WIN!' text and score onto an existing frame in-place."""
-        if not self.show_text and not (self.show_score and self.last_win_score):
-            return
-
+    def _draw_overlays(self, img: Image.Image) -> None:
+        """
+        Draw live overlays onto a frame copy:
+        - "CUBS WIN!" centered at the top, flashing (gold when on, hidden when off)
+        - Score right-aligned: cubs team abbr + score on top, opponent below
+        """
         draw = ImageDraw.Draw(img)
         w, h = img.size
 
-        if self.show_text:
-            # Bottom-left corner so it doesn't cover the flag center
-            self._draw_small_text(draw, "CUBS WIN!", 1, h - self.font_size * 2 - 3, GOLD)
+        # --- "CUBS WIN!" at top, flashing ---
+        if self.show_text and self._flash_on:
+            text = "CUBS WIN!"
+            bbox = draw.textbbox((0, 0), text, font=self.font)
+            text_w = bbox[2] - bbox[0]
+            x = max(0, (w - text_w) // 2)
+            # Black shadow for readability over the GIF
+            self._draw_small_text(draw, text, x + 1, 2, BLACK)
+            self._draw_small_text(draw, text, x, 1, GOLD)
 
-        if self.show_score and self.last_win_score:
-            self._draw_small_text(draw, self.last_win_score, 1, h - self.font_size - 1, WHITE)
+        # --- Score on the right side ---
+        if self.show_score and self._win_info:
+            cubs_abbr  = self._win_info.get("cubs_abbr", "CHC")
+            opp_abbr   = self._win_info.get("opp_abbr", "OPP")
+            cubs_score = self._win_info.get("cubs_score", 0)
+            opp_score  = self._win_info.get("opp_score", 0)
+
+            line1 = f"{cubs_abbr} {cubs_score}"
+            line2 = f"{opp_abbr} {opp_score}"
+
+            b1 = draw.textbbox((0, 0), line1, font=self.font)
+            b2 = draw.textbbox((0, 0), line2, font=self.font)
+            w1, w2 = b1[2] - b1[0], b2[2] - b2[0]
+
+            x1 = w - w1 - 1
+            x2 = w - w2 - 1
+
+            # Vertically center the two lines in the lower half
+            total_h = self.font_size * 2 + 2
+            y1 = (h - total_h) // 2
+            y2 = y1 + self.font_size + 2
+
+            # Black shadow
+            self._draw_small_text(draw, line1, x1 + 1, y1 + 1, BLACK)
+            self._draw_small_text(draw, line2, x2 + 1, y2 + 1, BLACK)
+            # Cubs score in white, opponent in red
+            self._draw_small_text(draw, line1, x1, y1, WHITE)
+            self._draw_small_text(draw, line2, x2, y2, CUBS_RED)
 
     def _build_programmatic_frames(self, num_frames: int = 16) -> None:
         """
@@ -335,7 +374,14 @@ class FlyTheWPlugin(BasePlugin):
         """Activate a simulated Cubs win for testing purposes."""
         self.celebrating = True
         self.win_expires_at = datetime.now() + timedelta(hours=self.celebration_hours)
-        self.last_win_score = "SIM"
+        self.last_win_score = "7-4"
+        self._win_info = {
+            "cubs_abbr":  "CHC",
+            "opp_abbr":   "SIM",
+            "cubs_score": 7,
+            "opp_score":  4,
+        }
+        self._live_priority_fired = False   # Allow one-shot live takeover
         self._build_frames()
         self.logger.info(
             "Simulated Cubs win activated — celebrating for %.1f hours", self.celebration_hours
@@ -440,8 +486,13 @@ class FlyTheWPlugin(BasePlugin):
                     hours=self.celebration_hours
                 )
                 self.last_win_score = score_str
-
-                # Rebuild frames so the score overlay is up to date
+                self._win_info = {
+                    "cubs_abbr":  CUBS_ABBR,
+                    "opp_abbr":   opp_abbr,
+                    "cubs_score": cubs_score,
+                    "opp_score":  opp_score,
+                }
+                self._live_priority_fired = False   # Allow one-shot live takeover
                 self._build_frames()
 
                 self.logger.info(
@@ -461,17 +512,26 @@ class FlyTheWPlugin(BasePlugin):
     # Display
     # ------------------------------------------------------------------
 
-    def display(self, force_clear: bool = False) -> None:
-        """Render the current animation frame to the LED matrix."""
+    def display(self, force_clear: bool = False) -> bool:
+        """Render the current animation frame to the LED matrix.
+
+        Returns False when not celebrating so the display controller skips
+        this plugin and advances to the next one in the rotation.
+        """
         if not self.celebrating:
-            return
+            return False
 
         if not self._frames:
             self._build_frames()
 
+        # Signal that we have been shown at least once — disables the
+        # live-priority re-takeover so normal rotation can resume afterward.
+        self._live_priority_fired = True
+
         try:
             now = time.monotonic()
-            # Use per-frame duration from GIF metadata; fall back to animation_fps
+
+            # Advance GIF frame
             if self._frame_durations:
                 frame_duration = self._frame_durations[self._frame_index % len(self._frame_durations)]
             else:
@@ -481,20 +541,34 @@ class FlyTheWPlugin(BasePlugin):
                 self._frame_index = (self._frame_index + 1) % len(self._frames)
                 self._last_frame_time = now
 
-            frame = self._frames[self._frame_index]
+            # Advance flash state
+            if now - self._flash_last_toggle >= self._flash_period:
+                self._flash_on = not self._flash_on
+                self._flash_last_toggle = now
+
+            # Copy base frame and draw live overlays (text + score)
+            frame = self._frames[self._frame_index].copy()
+            self._draw_overlays(frame)
+
             self.display_manager.image = frame
             self.display_manager.update_display()
+            return True
 
         except Exception as exc:
             self.logger.error("Error in display(): %s", exc, exc_info=True)
+            return False
 
     # ------------------------------------------------------------------
     # Live priority — take over display right after a win
     # ------------------------------------------------------------------
 
     def has_live_content(self) -> bool:
-        """Report live content when a celebration is active."""
-        return self.celebrating
+        """
+        Returns True exactly once per new win to trigger an immediate takeover.
+        After display() is first called, _live_priority_fired is set and this
+        returns False, allowing normal rotation to resume.
+        """
+        return self.celebrating and not self._live_priority_fired
 
     def get_live_modes(self) -> List[str]:
         return ["fly_the_w"]
@@ -583,5 +657,7 @@ class FlyTheWPlugin(BasePlugin):
     def cleanup(self) -> None:
         self._frames = []
         self._frame_durations = []
+        self._win_info = {}
         self.celebrating = False
+        self._live_priority_fired = False
         self.logger.info("Fly the W plugin cleaned up")
