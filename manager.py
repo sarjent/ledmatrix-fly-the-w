@@ -145,42 +145,35 @@ class FlyTheWPlugin(BasePlugin):
 
         self._build_programmatic_frames()
 
-    @property
-    def _banner_h(self) -> int:
-        """Height in pixels of the top text banner (two font rows + padding)."""
-        return self.font_size * 2 + 3
-
     def _load_gif_frames(self) -> bool:
         """
-        Extract frames from fly-the-w.gif.  The GIF is scaled to fill only
-        the area *below* the top text banner so overlays never touch the flag.
+        Extract frames from fly-the-w.gif, resize them to fit the display,
+        and optionally composite score/text overlays on top.
 
         Returns True on success, False on any error.
         """
         try:
             gif = Image.open(GIF_FILE)
             w, h = self.display_width, self.display_height
-            banner_h = self._banner_h
-            gif_area_h = h - banner_h       # pixels available for the flag
 
             frames: List[Image.Image] = []
             durations: List[float] = []
 
             for raw_frame in ImageSequence.Iterator(gif):
-                # Per-frame duration (GIF stores milliseconds)
+                # Grab per-frame duration (GIF stores it in milliseconds)
                 duration_ms = raw_frame.info.get("duration", 100)
                 durations.append(duration_ms / 1000.0)
 
                 # Convert palette/transparency to RGBA so resize is clean
                 frame_rgba = raw_frame.convert("RGBA")
 
-                # Scale to fit the GIF area only (letterbox)
-                frame_rgba.thumbnail((w, gif_area_h), Image.Resampling.LANCZOS)
+                # Scale to fit the display (letterbox — preserve aspect ratio)
+                frame_rgba.thumbnail((w, h), Image.Resampling.LANCZOS)
 
-                # Black canvas for full display; paste GIF flush against the banner
+                # Center on a black RGB canvas
                 canvas = Image.new("RGB", (w, h), BLACK)
                 paste_x = (w - frame_rgba.width) // 2
-                paste_y = banner_h              # immediately below the banner
+                paste_y = (h - frame_rgba.height) // 2
                 canvas.paste(frame_rgba, (paste_x, paste_y), frame_rgba)
 
                 frames.append(canvas)
@@ -202,24 +195,24 @@ class FlyTheWPlugin(BasePlugin):
 
     def _draw_overlays(self, img: Image.Image) -> None:
         """
-        Draw the top banner onto the frame.  The banner occupies the top
-        _banner_h pixels — the same area the GIF never touches — so there
-        is zero overlap between text and the flag image.
-
-        Banner layout:
-          Row 1  (y=1):            [CUBS WIN! ← flashing]   [CHC N →]
-          Row 2  (y=font_size+2):                            [OPP N →]
+        Draw live overlays onto a frame copy:
+        - "CUBS WIN!" centered at the top, flashing (gold when on, hidden when off)
+        - Score right-aligned: cubs team abbr + score on top, opponent below
         """
         draw = ImageDraw.Draw(img)
-        w    = img.size[0]
-        row1_y = 1
-        row2_y = self.font_size + 2
+        w, h = img.size
 
-        # --- "CUBS WIN!" top-left, flashing ---
+        # --- "CUBS WIN!" at top, flashing ---
         if self.show_text and self._flash_on:
-            self._draw_small_text(draw, "CUBS WIN!", 1, row1_y, GOLD)
+            text = "CUBS WIN!"
+            bbox = draw.textbbox((0, 0), text, font=self.font)
+            text_w = bbox[2] - bbox[0]
+            x = max(0, (w - text_w) // 2)
+            # Black shadow for readability over the GIF
+            self._draw_small_text(draw, text, x + 1, 2, BLACK)
+            self._draw_small_text(draw, text, x, 1, GOLD)
 
-        # --- Score top-right, two lines ---
+        # --- Score on the right side ---
         if self.show_score and self._win_info:
             cubs_abbr  = self._win_info.get("cubs_abbr", "CHC")
             opp_abbr   = self._win_info.get("opp_abbr", "OPP")
@@ -229,11 +222,24 @@ class FlyTheWPlugin(BasePlugin):
             line1 = f"{cubs_abbr} {cubs_score}"
             line2 = f"{opp_abbr} {opp_score}"
 
-            w1 = draw.textbbox((0, 0), line1, font=self.font)[2]
-            w2 = draw.textbbox((0, 0), line2, font=self.font)[2]
+            b1 = draw.textbbox((0, 0), line1, font=self.font)
+            b2 = draw.textbbox((0, 0), line2, font=self.font)
+            w1, w2 = b1[2] - b1[0], b2[2] - b2[0]
 
-            self._draw_small_text(draw, line1, w - w1 - 1, row1_y, WHITE)
-            self._draw_small_text(draw, line2, w - w2 - 1, row2_y, CUBS_RED)
+            x1 = w - w1 - 1
+            x2 = w - w2 - 1
+
+            # Vertically center the two lines in the lower half
+            total_h = self.font_size * 2 + 2
+            y1 = (h - total_h) // 2
+            y2 = y1 + self.font_size + 2
+
+            # Black shadow
+            self._draw_small_text(draw, line1, x1 + 1, y1 + 1, BLACK)
+            self._draw_small_text(draw, line2, x2 + 1, y2 + 1, BLACK)
+            # Cubs score in white, opponent in red
+            self._draw_small_text(draw, line1, x1, y1, WHITE)
+            self._draw_small_text(draw, line2, x2, y2, CUBS_RED)
 
     def _build_programmatic_frames(self, num_frames: int = 16) -> None:
         """
@@ -254,40 +260,56 @@ class FlyTheWPlugin(BasePlugin):
     def _render_flag_frame(
         self, w: int, h: int, frame_idx: int, num_frames: int
     ) -> Image.Image:
-        """Render a single programmatic waving-flag frame below the text banner."""
+        """Render a single waving-flag frame."""
         img = Image.new("RGB", (w, h), BLACK)
-
-        banner_h = self._banner_h
-        flag_area_h = h - banner_h          # usable height below the banner
 
         phase = (2 * math.pi * frame_idx) / num_frames
 
-        flag_w   = w
-        flag_h   = int(flag_area_h * 0.9)
-        # Centre the flag vertically within the area below the banner
-        flag_top = banner_h + (flag_area_h - flag_h) // 2
+        # --- Flag body -------------------------------------------------------
+        # The flag occupies the left ~60 % of the display; right side has text.
+        flag_w = int(w * 0.6)
+        flag_h = int(h * 0.75)
+        flag_top = (h - flag_h) // 2
 
+        # Build flag column by column with a sine-wave vertical offset
         amplitude = max(1, flag_h // 8)
         for col in range(flag_w):
+            # Wave increases from left (pole) to right (free end)
             wave_factor = col / max(flag_w - 1, 1)
-            offset    = int(amplitude * wave_factor * math.sin(phase + col * 0.3))
-            col_top   = flag_top + offset
-            col_bot   = col_top + flag_h
-            mid       = col_top + flag_h // 2
+            offset = int(amplitude * wave_factor * math.sin(phase + col * 0.3))
+            col_top = flag_top + offset
+            col_bot = col_top + flag_h
+
+            # Split flag horizontally: top half blue, bottom half red
+            mid = col_top + flag_h // 2
             for row in range(col_top, col_bot):
-                if banner_h <= row < h:
-                    img.putpixel((col, row), CUBS_BLUE if row < mid else CUBS_RED)
+                if 0 <= row < h:
+                    color = CUBS_BLUE if row < mid else CUBS_RED
+                    img.putpixel((col, row), color)
 
-        # "W" centred on the flag
-        wx = flag_w // 2
-        wy = flag_top + flag_h // 2
-        wave_offset = int(amplitude * 0.5 * math.sin(phase + wx * 0.3))
-        self._draw_w(img, wx, wy + wave_offset)
+        # --- "W" letter on the flag ------------------------------------------
+        w_center_x = flag_w // 2
+        w_center_y = flag_top + flag_h // 2
+        wave_offset = int(amplitude * 0.5 * math.sin(phase + w_center_x * 0.3))
+        self._draw_w(img, w_center_x, w_center_y + wave_offset)
 
-        # Flag pole along the left edge, below the banner
+        # --- Flag pole (1-pixel wide on the left) ----------------------------
+        pole_x = 0
         for row in range(flag_top - 2, flag_top + flag_h + 2):
-            if banner_h <= row < h:
-                img.putpixel((0, row), WHITE)
+            if 0 <= row < h:
+                img.putpixel((pole_x, row), WHITE)
+
+        # --- Text overlay (right side of display) ----------------------------
+        draw = ImageDraw.Draw(img)
+        text_x = flag_w + 2
+
+        if self.show_text:
+            self._draw_small_text(draw, "CUBS", text_x, 2, GOLD)
+            self._draw_small_text(draw, "WIN!", text_x, 2 + self.font_size + 1, WHITE)
+
+        if self.show_score and self.last_win_score:
+            score_y = h - self.font_size - 2
+            self._draw_small_text(draw, self.last_win_score, text_x, score_y, WHITE)
 
         return img
 
