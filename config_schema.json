@@ -1,0 +1,102 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "title": "Fly the W Plugin Configuration",
+  "description": "Configuration for the Chicago Cubs Fly the W celebration plugin",
+  "properties": {
+    "enabled": {
+      "type": "boolean",
+      "description": "Enable or disable the plugin",
+      "default": true
+    },
+    "display_duration": {
+      "type": "number",
+      "description": "How long (in seconds) to show the plugin per rotation slot while celebrating",
+      "default": 30,
+      "minimum": 5,
+      "maximum": 300
+    },
+    "update_interval": {
+      "type": "number",
+      "description": "How often (in seconds) to poll the ESPN MLB scoreboard for a Cubs win",
+      "default": 300,
+      "minimum": 60,
+      "maximum": 3600
+    },
+    "celebration_hours": {
+      "type": "number",
+      "description": "How many hours to display the W flag after a Cubs win (default 1 hour)",
+      "default": 1.0,
+      "minimum": 0.1,
+      "maximum": 24.0
+    },
+    "animation_fps": {
+      "type": "number",
+      "description": "Target frames per second for the waving flag animation",
+      "default": 12.0,
+      "minimum": 1.0,
+      "maximum": 60.0
+    },
+    "show_score": {
+      "type": "boolean",
+      "description": "Overlay the final score on the display",
+      "default": true
+    },
+    "show_text": {
+      "type": "boolean",
+      "description": "Show 'CUBS WIN!' text alongside the flag",
+      "default": true
+    },
+    "font_name": {
+      "type": "string",
+      "description": "Font file to use for text overlays (from assets/fonts directory)",
+      "default": "4x6-font.ttf",
+      "enum": [
+        "4x6-font.ttf",
+        "PressStart2P-Regular.ttf",
+        "tom-thumb.ttf"
+      ]
+    },
+    "font_size": {
+      "type": "integer",
+      "description": "Font size for text overlays",
+      "default": 6,
+      "minimum": 4,
+      "maximum": 12
+    },
+    "live_priority": {
+      "type": "boolean",
+      "description": "When true, the plugin takes over the display immediately after a Cubs win instead of waiting for its normal rotation slot",
+      "default": true
+    },
+    "transition": {
+      "type": "object",
+      "description": "Transition settings when entering/leaving this plugin",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["redraw", "fade", "slide", "wipe"],
+          "default": "fade"
+        },
+        "speed": {
+          "type": "integer",
+          "description": "Transition speed (1-10)",
+          "default": 3,
+          "minimum": 1,
+          "maximum": 10
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "vegas_mode": {
+      "type": "string",
+      "description": "How this plugin appears in Vegas scroll mode. 'static' pauses the scroll while the flag displays (recommended). 'fixed' scrolls the flag by as a block.",
+      "enum": ["static", "fixed"],
+      "default": "static"
+    }
+  },
+  "additionalProperties": false
+}

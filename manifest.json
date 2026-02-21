@@ -1,0 +1,36 @@
+{
+  "id": "fly-the-w",
+  "name": "Fly the W",
+  "version": "1.0.0",
+  "author": "Custom Plugin",
+  "description": "Displays an animated Chicago Cubs 'W' flag celebration on the LED matrix when the Cubs win a game. Activates immediately after a game final and stays visible for a configurable duration (default 1 hour). Supports Vegas scroll mode.",
+  "entry_point": "manager.py",
+  "class_name": "FlyTheWPlugin",
+  "category": "sports",
+  "tags": [
+    "baseball",
+    "mlb",
+    "cubs",
+    "chicago",
+    "celebration",
+    "sports"
+  ],
+  "display_modes": [
+    "fly_the_w"
+  ],
+  "update_interval": 300,
+  "default_duration": 30,
+  "requires": {
+    "python": ">=3.9"
+  },
+  "config_schema": "config_schema.json",
+  "api_requirements": [
+    {
+      "name": "ESPN MLB API",
+      "required": true,
+      "description": "Public ESPN API for MLB scoreboard data — no key required",
+      "url": "https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard",
+      "rate_limit": "No enforced limit; update_interval throttles requests"
+    }
+  ]
+}

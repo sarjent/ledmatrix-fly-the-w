@@ -1,0 +1,471 @@
+"""
+Fly the W - Chicago Cubs Win Celebration Plugin for LEDMatrix
+
+Displays an animated "W" flag on the LED matrix immediately after the Chicago
+Cubs win a game. The celebration remains visible for a user-configurable
+duration (default 1 hour) after the game ends.
+
+Supports Vegas scroll mode.
+
+API Version: 1.0.0
+"""
+
+import math
+import time
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+from PIL import Image, ImageDraw, ImageFont
+
+from src.plugin_system.base_plugin import BasePlugin, VegasDisplayMode
+from src.common import APIHelper
+
+# ESPN MLB scoreboard endpoint (no API key required)
+ESPN_MLB_URL = "https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard"
+
+# Chicago Cubs team abbreviation in ESPN data
+CUBS_ABBR = "CHC"
+
+# Cubs brand colors
+CUBS_BLUE = (14, 51, 134)    # Wrigley blue
+CUBS_RED = (204, 52, 51)     # Pinstripe red
+WHITE = (255, 255, 255)
+BLACK = (0, 0, 0)
+GOLD = (255, 215, 0)
+
+
+class FlyTheWPlugin(BasePlugin):
+    """
+    Chicago Cubs 'Fly the W' celebration plugin.
+
+    Monitors the MLB scoreboard via the ESPN API and activates immediately
+    when the Cubs win a game. The animated W flag is displayed for a
+    configurable window (default 1 hour) after the game becomes final.
+
+    Configuration options:
+        enabled (bool): Enable/disable plugin (default: true)
+        display_duration (float): Seconds to show the plugin per rotation slot (default: 30)
+        update_interval (int): API poll interval in seconds (default: 300)
+        celebration_hours (float): Hours to celebrate after a win (default: 1.0)
+        animation_fps (float): Target frames per second for flag wave (default: 12.0)
+        show_score (bool): Overlay the final score on the display (default: true)
+        show_text (bool): Overlay "CUBS WIN!" text (default: true)
+    """
+
+    def __init__(
+        self,
+        plugin_id: str,
+        config: Dict[str, Any],
+        display_manager: Any,
+        cache_manager: Any,
+        plugin_manager: Any,
+    ) -> None:
+        super().__init__(plugin_id, config, display_manager, cache_manager, plugin_manager)
+
+        self.display_width: int = display_manager.matrix.width
+        self.display_height: int = display_manager.matrix.height
+
+        self.api_helper = APIHelper(cache_manager=cache_manager, logger=self.logger)
+
+        self._load_config()
+        self._load_fonts()
+
+        # Win state
+        self.celebrating: bool = False
+        self.win_expires_at: Optional[datetime] = None
+        self.last_win_score: str = ""          # e.g. "CHC 5, MIL 3"
+        self.last_update: Optional[datetime] = None
+
+        # Animation state
+        self._frames: List[Image.Image] = []
+        self._frame_index: int = 0
+        self._last_frame_time: float = 0.0
+
+        # Build animation frames once during init (cheap PIL drawing, no network)
+        self._build_frames()
+
+        self.logger.info("Fly the W plugin initialized (display %dx%d)", self.display_width, self.display_height)
+
+    # ------------------------------------------------------------------
+    # Configuration
+    # ------------------------------------------------------------------
+
+    def _load_config(self) -> None:
+        self.update_interval_seconds: int = int(self.config.get("update_interval", 300))
+        self.celebration_hours: float = float(self.config.get("celebration_hours", 1.0))
+        self.animation_fps: float = float(self.config.get("animation_fps", 12.0))
+        self.show_score: bool = bool(self.config.get("show_score", True))
+        self.show_text: bool = bool(self.config.get("show_text", True))
+        self.font_name: str = self.config.get("font_name", "4x6-font.ttf")
+        self.font_size: int = int(self.config.get("font_size", 6))
+
+    def _load_fonts(self) -> None:
+        try:
+            font_path = Path("assets/fonts") / self.font_name
+            if font_path.exists():
+                self.font = ImageFont.truetype(str(font_path), self.font_size)
+            else:
+                self.font = ImageFont.load_default()
+                self.logger.warning("Font %s not found, using default", self.font_name)
+        except Exception as exc:
+            self.logger.error("Error loading font: %s", exc)
+            self.font = ImageFont.load_default()
+
+    # ------------------------------------------------------------------
+    # Animation frame generation (pure PIL — no external GIF required)
+    # ------------------------------------------------------------------
+
+    def _build_frames(self, num_frames: int = 16) -> None:
+        """
+        Generate a set of waving-flag animation frames using PIL.
+
+        Each frame shows:
+        - Black background
+        - A waving blue/red Cubs "W" flag rendered via sine-wave distortion
+        - Optionally "CUBS WIN!" text and the final score
+        """
+        self._frames = []
+        w, h = self.display_width, self.display_height
+
+        for frame_idx in range(num_frames):
+            img = self._render_flag_frame(w, h, frame_idx, num_frames)
+            self._frames.append(img)
+
+        self.logger.debug("Built %d animation frames (%dx%d)", num_frames, w, h)
+
+    def _render_flag_frame(
+        self, w: int, h: int, frame_idx: int, num_frames: int
+    ) -> Image.Image:
+        """Render a single waving-flag frame."""
+        img = Image.new("RGB", (w, h), BLACK)
+
+        phase = (2 * math.pi * frame_idx) / num_frames
+
+        # --- Flag body -------------------------------------------------------
+        # The flag occupies the left ~60 % of the display; right side has text.
+        flag_w = int(w * 0.6)
+        flag_h = int(h * 0.75)
+        flag_top = (h - flag_h) // 2
+
+        # Build flag column by column with a sine-wave vertical offset
+        amplitude = max(1, flag_h // 8)
+        for col in range(flag_w):
+            # Wave increases from left (pole) to right (free end)
+            wave_factor = col / max(flag_w - 1, 1)
+            offset = int(amplitude * wave_factor * math.sin(phase + col * 0.3))
+            col_top = flag_top + offset
+            col_bot = col_top + flag_h
+
+            # Split flag horizontally: top half blue, bottom half red
+            mid = col_top + flag_h // 2
+            for row in range(col_top, col_bot):
+                if 0 <= row < h:
+                    color = CUBS_BLUE if row < mid else CUBS_RED
+                    img.putpixel((col, row), color)
+
+        # --- "W" letter on the flag ------------------------------------------
+        w_center_x = flag_w // 2
+        w_center_y = flag_top + flag_h // 2
+        wave_offset = int(amplitude * 0.5 * math.sin(phase + w_center_x * 0.3))
+        self._draw_w(img, w_center_x, w_center_y + wave_offset)
+
+        # --- Flag pole (1-pixel wide on the left) ----------------------------
+        pole_x = 0
+        for row in range(flag_top - 2, flag_top + flag_h + 2):
+            if 0 <= row < h:
+                img.putpixel((pole_x, row), WHITE)
+
+        # --- Text overlay (right side of display) ----------------------------
+        draw = ImageDraw.Draw(img)
+        text_x = flag_w + 2
+
+        if self.show_text:
+            self._draw_small_text(draw, "CUBS", text_x, 2, GOLD)
+            self._draw_small_text(draw, "WIN!", text_x, 2 + self.font_size + 1, WHITE)
+
+        if self.show_score and self.last_win_score:
+            score_y = h - self.font_size - 2
+            self._draw_small_text(draw, self.last_win_score, text_x, score_y, WHITE)
+
+        return img
+
+    def _draw_w(self, img: Image.Image, cx: int, cy: int) -> None:
+        """
+        Draw a blocky white 'W' centered at (cx, cy) using putpixel.
+        Scales with the display size so it's always readable.
+        """
+        scale = max(1, self.display_height // 16)
+        pts = self._w_pixels(scale)
+        for dx, dy in pts:
+            x, y = cx + dx, cy + dy
+            if 0 <= x < img.width and 0 <= y < img.height:
+                img.putpixel((x, y), WHITE)
+
+    @staticmethod
+    def _w_pixels(scale: int = 1) -> List[Tuple[int, int]]:
+        """
+        Return a list of (dx, dy) offsets that form a 'W' shape.
+        The letter fits in a ~7×5 pixel grid, scaled by `scale`.
+        """
+        pattern = [
+            # Two downward strokes on the outside, two upward in the middle
+            (0, 0), (0, 1), (0, 2), (0, 3),
+            (1, 3), (1, 4),
+            (2, 2), (2, 3),
+            (3, 3), (3, 4),
+            (4, 3), (4, 4),
+            (5, 2), (5, 3),
+            (6, 3), (6, 4),
+            (7, 3),
+            (8, 0), (8, 1), (8, 2), (8, 3),
+        ]
+        half_w = 4 * scale
+        half_h = 2 * scale
+        result = []
+        for px, py in pattern:
+            for sx in range(scale):
+                for sy in range(scale):
+                    result.append((px * scale + sx - half_w, py * scale + sy - half_h))
+        return result
+
+    def _draw_small_text(
+        self,
+        draw: ImageDraw.ImageDraw,
+        text: str,
+        x: int,
+        y: int,
+        color: Tuple[int, int, int],
+    ) -> None:
+        """Draw text; clip gracefully if it exceeds the display width."""
+        try:
+            draw.text((x, y), text, font=self.font, fill=color)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Plugin lifecycle
+    # ------------------------------------------------------------------
+
+    def update(self) -> None:
+        """Poll the ESPN MLB API to detect a fresh Cubs win."""
+        # Throttle API calls to update_interval_seconds
+        if self.last_update:
+            elapsed = (datetime.now() - self.last_update).total_seconds()
+            if elapsed < self.update_interval_seconds:
+                self.logger.debug(
+                    "Skipping update, last check was %.0fs ago", elapsed
+                )
+                # Still expire the celebration window if time ran out
+                self._check_expiry()
+                return
+
+        try:
+            data = self.api_helper.get(url=ESPN_MLB_URL)
+            if data:
+                self._process_scoreboard(data)
+            else:
+                self.logger.warning("No data returned from ESPN MLB API")
+        except Exception as exc:
+            self.logger.error("Error during update: %s", exc, exc_info=True)
+
+        self.last_update = datetime.now()
+        self._check_expiry()
+
+    def _process_scoreboard(self, data: Dict[str, Any]) -> None:
+        """
+        Scan today's MLB scoreboard for a final Cubs win.
+
+        Sets self.celebrating = True and records win expiry when a new win
+        is detected. Existing celebrations are NOT reset if no new win is
+        found (the expiry window handles cleanup).
+        """
+        events = data.get("events", [])
+        for event in events:
+            competitions = event.get("competitions", [])
+            if not competitions:
+                continue
+
+            competition = competitions[0]
+            status = competition.get("status", {})
+            state = status.get("type", {}).get("state", "")
+
+            # Only care about completed games
+            if state != "post":
+                continue
+
+            competitors = competition.get("competitors", [])
+            home_team = next(
+                (c for c in competitors if c.get("homeAway") == "home"), None
+            )
+            away_team = next(
+                (c for c in competitors if c.get("homeAway") == "away"), None
+            )
+
+            if not home_team or not away_team:
+                continue
+
+            home_abbr = home_team.get("team", {}).get("abbreviation", "")
+            away_abbr = away_team.get("team", {}).get("abbreviation", "")
+            home_score = int(home_team.get("score", 0) or 0)
+            away_score = int(away_team.get("score", 0) or 0)
+
+            # Is this a Cubs game?
+            if CUBS_ABBR not in (home_abbr, away_abbr):
+                continue
+
+            # Did the Cubs win?
+            if home_abbr == CUBS_ABBR:
+                cubs_won = home_score > away_score
+                cubs_score, opp_score = home_score, away_score
+                opp_abbr = away_abbr
+            else:
+                cubs_won = away_score > home_score
+                cubs_score, opp_score = away_score, home_score
+                opp_abbr = home_abbr
+
+            if not cubs_won:
+                self.logger.debug("Cubs lost to %s (%d-%d) — no celebration", opp_abbr, cubs_score, opp_score)
+                continue
+
+            # Build score string
+            score_str = f"{cubs_score}-{opp_score}"
+
+            # Only trigger a fresh celebration if we haven't already started one
+            # for this game result (avoid re-triggering on every poll).
+            if not self.celebrating or self.last_win_score != score_str:
+                self.celebrating = True
+                self.win_expires_at = datetime.now() + timedelta(
+                    hours=self.celebration_hours
+                )
+                self.last_win_score = score_str
+
+                # Rebuild frames so the score overlay is up to date
+                self._build_frames()
+
+                self.logger.info(
+                    "Cubs win detected! %s %d – %s %d. Celebrating for %.1f hours.",
+                    CUBS_ABBR, cubs_score, opp_abbr, opp_score, self.celebration_hours,
+                )
+            return  # Found the Cubs game; stop iterating
+
+    def _check_expiry(self) -> None:
+        """Deactivate celebration if the configured window has passed."""
+        if self.celebrating and self.win_expires_at:
+            if datetime.now() >= self.win_expires_at:
+                self.celebrating = False
+                self.logger.info("Cubs win celebration window expired")
+
+    # ------------------------------------------------------------------
+    # Display
+    # ------------------------------------------------------------------
+
+    def display(self, force_clear: bool = False) -> None:
+        """Render the current animation frame to the LED matrix."""
+        if not self.celebrating:
+            return
+
+        if not self._frames:
+            self._build_frames()
+
+        try:
+            now = time.monotonic()
+            frame_duration = 1.0 / max(self.animation_fps, 1.0)
+
+            if now - self._last_frame_time >= frame_duration:
+                self._frame_index = (self._frame_index + 1) % len(self._frames)
+                self._last_frame_time = now
+
+            frame = self._frames[self._frame_index]
+            self.display_manager.image = frame
+            self.display_manager.update_display()
+
+        except Exception as exc:
+            self.logger.error("Error in display(): %s", exc, exc_info=True)
+
+    # ------------------------------------------------------------------
+    # Live priority — take over display right after a win
+    # ------------------------------------------------------------------
+
+    def has_live_content(self) -> bool:
+        """Report live content when a celebration is active."""
+        return self.celebrating
+
+    def get_live_modes(self) -> List[str]:
+        return ["fly_the_w"]
+
+    # ------------------------------------------------------------------
+    # Vegas scroll mode support
+    # ------------------------------------------------------------------
+
+    def get_vegas_content_type(self) -> str:
+        return "static" if self.celebrating else "none"
+
+    def get_vegas_display_mode(self) -> VegasDisplayMode:
+        if self.celebrating:
+            return VegasDisplayMode.STATIC
+        return VegasDisplayMode.FIXED_SEGMENT
+
+    def get_vegas_content(self) -> Optional[Image.Image]:
+        """Return the current animation frame as a static Vegas block."""
+        if not self.celebrating or not self._frames:
+            return None
+        return self._frames[self._frame_index % len(self._frames)]
+
+    # ------------------------------------------------------------------
+    # Configuration & lifecycle helpers
+    # ------------------------------------------------------------------
+
+    def validate_config(self) -> bool:
+        if not super().validate_config():
+            return False
+
+        hours = self.config.get("celebration_hours", 1.0)
+        try:
+            hours = float(hours)
+            if hours <= 0 or hours > 24:
+                self.logger.error("celebration_hours must be between 0 and 24")
+                return False
+        except (TypeError, ValueError):
+            self.logger.error("celebration_hours must be a number")
+            return False
+
+        fps = self.config.get("animation_fps", 12.0)
+        try:
+            fps = float(fps)
+            if fps <= 0 or fps > 60:
+                self.logger.error("animation_fps must be between 0 and 60")
+                return False
+        except (TypeError, ValueError):
+            self.logger.error("animation_fps must be a number")
+            return False
+
+        return True
+
+    def on_config_change(self, new_config: Dict[str, Any]) -> None:
+        super().on_config_change(new_config)
+        self._load_config()
+        self._load_fonts()
+        self._build_frames()
+        self.logger.info("Configuration updated")
+
+    def get_info(self) -> Dict[str, Any]:
+        info = super().get_info()
+        info.update(
+            {
+                "celebrating": self.celebrating,
+                "win_expires_at": (
+                    self.win_expires_at.isoformat() if self.win_expires_at else None
+                ),
+                "last_win_score": self.last_win_score,
+                "last_update": (
+                    self.last_update.isoformat() if self.last_update else None
+                ),
+            }
+        )
+        return info
+
+    def cleanup(self) -> None:
+        self._frames = []
+        self.celebrating = False
+        self.logger.info("Fly the W plugin cleaned up")
