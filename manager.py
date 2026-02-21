@@ -205,12 +205,9 @@ class FlyTheWPlugin(BasePlugin):
         # --- "CUBS WIN!" at top, flashing ---
         if self.show_text and self._flash_on:
             text = "CUBS WIN!"
-            bbox = draw.textbbox((0, 0), text, font=self.font)
-            text_w = bbox[2] - bbox[0]
-            x = max(0, (w - text_w) // 2)
             # Black shadow for readability over the GIF
-            self._draw_small_text(draw, text, x + 1, 2, BLACK)
-            self._draw_small_text(draw, text, x, 1, GOLD)
+            self._draw_small_text(draw, text, 2, 2, BLACK)
+            self._draw_small_text(draw, text, 1, 1, GOLD)
 
         # --- Score on the right side ---
         if self.show_score and self._win_info:
