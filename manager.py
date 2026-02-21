@@ -16,13 +16,16 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageSequence
 
 from src.plugin_system.base_plugin import BasePlugin, VegasDisplayMode
 from src.common import APIHelper
 
 # ESPN MLB scoreboard endpoint (no API key required)
 ESPN_MLB_URL = "https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard"
+
+# Bundled GIF file (lives alongside manager.py)
+GIF_FILE = Path(__file__).parent / "fly-the-w.gif"
 
 # Chicago Cubs team abbreviation in ESPN data
 CUBS_ABBR = "CHC"
@@ -79,10 +82,11 @@ class FlyTheWPlugin(BasePlugin):
 
         # Animation state
         self._frames: List[Image.Image] = []
+        self._frame_durations: List[float] = []   # per-frame delay in seconds
         self._frame_index: int = 0
         self._last_frame_time: float = 0.0
 
-        # Build animation frames once during init (cheap PIL drawing, no network)
+        # Build animation frames once during init
         self._build_frames()
 
         self.logger.info("Fly the W plugin initialized (display %dx%d)", self.display_width, self.display_height)
@@ -114,26 +118,105 @@ class FlyTheWPlugin(BasePlugin):
             self.font = ImageFont.load_default()
 
     # ------------------------------------------------------------------
-    # Animation frame generation (pure PIL — no external GIF required)
+    # Animation frame generation
     # ------------------------------------------------------------------
 
-    def _build_frames(self, num_frames: int = 16) -> None:
+    def _build_frames(self) -> None:
         """
-        Generate a set of waving-flag animation frames using PIL.
+        Load animation frames from the bundled GIF file.
+        Falls back to a programmatically generated waving flag if the GIF
+        is missing.
+        """
+        if GIF_FILE.exists():
+            if self._load_gif_frames():
+                return
+            self.logger.warning("GIF load failed, falling back to programmatic animation")
+        else:
+            self.logger.warning("GIF file not found at %s, using programmatic animation", GIF_FILE)
 
-        Each frame shows:
-        - Black background
-        - A waving blue/red Cubs "W" flag rendered via sine-wave distortion
-        - Optionally "CUBS WIN!" text and the final score
+        self._build_programmatic_frames()
+
+    def _load_gif_frames(self) -> bool:
+        """
+        Extract frames from fly-the-w.gif, resize them to fit the display,
+        and optionally composite score/text overlays on top.
+
+        Returns True on success, False on any error.
+        """
+        try:
+            gif = Image.open(GIF_FILE)
+            w, h = self.display_width, self.display_height
+
+            frames: List[Image.Image] = []
+            durations: List[float] = []
+
+            for raw_frame in ImageSequence.Iterator(gif):
+                # Grab per-frame duration (GIF stores it in milliseconds)
+                duration_ms = raw_frame.info.get("duration", 100)
+                durations.append(duration_ms / 1000.0)
+
+                # Convert palette/transparency to RGBA so resize is clean
+                frame_rgba = raw_frame.convert("RGBA")
+
+                # Scale to fit the display (letterbox — preserve aspect ratio)
+                frame_rgba.thumbnail((w, h), Image.Resampling.LANCZOS)
+
+                # Center on a black RGB canvas
+                canvas = Image.new("RGB", (w, h), BLACK)
+                paste_x = (w - frame_rgba.width) // 2
+                paste_y = (h - frame_rgba.height) // 2
+                canvas.paste(frame_rgba, (paste_x, paste_y), frame_rgba)
+
+                # Overlay score / text if configured
+                self._add_overlays(canvas)
+
+                frames.append(canvas)
+
+            if not frames:
+                return False
+
+            self._frames = frames
+            self._frame_durations = durations
+            self.logger.info(
+                "Loaded %d frames from %s (display %dx%d)",
+                len(frames), GIF_FILE.name, w, h,
+            )
+            return True
+
+        except Exception as exc:
+            self.logger.error("Error loading GIF: %s", exc, exc_info=True)
+            return False
+
+    def _add_overlays(self, img: Image.Image) -> None:
+        """Composite 'CUBS WIN!' text and score onto an existing frame in-place."""
+        if not self.show_text and not (self.show_score and self.last_win_score):
+            return
+
+        draw = ImageDraw.Draw(img)
+        w, h = img.size
+
+        if self.show_text:
+            # Bottom-left corner so it doesn't cover the flag center
+            self._draw_small_text(draw, "CUBS WIN!", 1, h - self.font_size * 2 - 3, GOLD)
+
+        if self.show_score and self.last_win_score:
+            self._draw_small_text(draw, self.last_win_score, 1, h - self.font_size - 1, WHITE)
+
+    def _build_programmatic_frames(self, num_frames: int = 16) -> None:
+        """
+        Fallback: generate a waving flag animation entirely with PIL.
+        Uses a fixed fps derived from self.animation_fps.
         """
         self._frames = []
+        frame_duration = 1.0 / max(self.animation_fps, 1.0)
+        self._frame_durations = [frame_duration] * num_frames
         w, h = self.display_width, self.display_height
 
         for frame_idx in range(num_frames):
             img = self._render_flag_frame(w, h, frame_idx, num_frames)
             self._frames.append(img)
 
-        self.logger.debug("Built %d animation frames (%dx%d)", num_frames, w, h)
+        self.logger.debug("Built %d programmatic frames (%dx%d)", num_frames, w, h)
 
     def _render_flag_frame(
         self, w: int, h: int, frame_idx: int, num_frames: int
@@ -388,7 +471,11 @@ class FlyTheWPlugin(BasePlugin):
 
         try:
             now = time.monotonic()
-            frame_duration = 1.0 / max(self.animation_fps, 1.0)
+            # Use per-frame duration from GIF metadata; fall back to animation_fps
+            if self._frame_durations:
+                frame_duration = self._frame_durations[self._frame_index % len(self._frame_durations)]
+            else:
+                frame_duration = 1.0 / max(self.animation_fps, 1.0)
 
             if now - self._last_frame_time >= frame_duration:
                 self._frame_index = (self._frame_index + 1) % len(self._frames)
@@ -495,5 +582,6 @@ class FlyTheWPlugin(BasePlugin):
 
     def cleanup(self) -> None:
         self._frames = []
+        self._frame_durations = []
         self.celebrating = False
         self.logger.info("Fly the W plugin cleaned up")
