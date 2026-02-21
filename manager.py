@@ -196,8 +196,8 @@ class FlyTheWPlugin(BasePlugin):
     def _draw_overlays(self, img: Image.Image) -> None:
         """
         Draw live overlays onto a frame copy:
-        - "CUBS WIN!" centered at the top, flashing (gold when on, hidden when off)
-        - Score right-aligned: cubs team abbr + score on top, opponent below
+        - "CUBS WIN!" top-left, flashing (gold when on, hidden when off)
+        - Score right-aligned top-right: cubs team abbr + score on row 1, opponent on row 2
         """
         draw = ImageDraw.Draw(img)
         w, h = img.size
