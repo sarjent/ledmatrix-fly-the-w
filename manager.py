@@ -99,6 +99,7 @@ class FlyTheWPlugin(BasePlugin):
         self.show_text: bool = bool(self.config.get("show_text", True))
         self.font_name: str = self.config.get("font_name", "4x6-font.ttf")
         self.font_size: int = int(self.config.get("font_size", 6))
+        self.simulate_win: bool = bool(self.config.get("simulate_win", False))
 
     def _load_fonts(self) -> None:
         try:
@@ -247,8 +248,25 @@ class FlyTheWPlugin(BasePlugin):
     # Plugin lifecycle
     # ------------------------------------------------------------------
 
+    def _trigger_simulation(self) -> None:
+        """Activate a simulated Cubs win for testing purposes."""
+        self.celebrating = True
+        self.win_expires_at = datetime.now() + timedelta(hours=self.celebration_hours)
+        self.last_win_score = "SIM"
+        self._build_frames()
+        self.logger.info(
+            "Simulated Cubs win activated — celebrating for %.1f hours", self.celebration_hours
+        )
+
     def update(self) -> None:
         """Poll the ESPN MLB API to detect a fresh Cubs win."""
+        # Simulation mode — skip API and force celebration
+        if self.simulate_win:
+            if not self.celebrating:
+                self._trigger_simulation()
+            self._check_expiry()
+            return
+
         # Throttle API calls to update_interval_seconds
         if self.last_update:
             elapsed = (datetime.now() - self.last_update).total_seconds()
@@ -443,10 +461,20 @@ class FlyTheWPlugin(BasePlugin):
         return True
 
     def on_config_change(self, new_config: Dict[str, Any]) -> None:
+        was_simulating = self.simulate_win
         super().on_config_change(new_config)
         self._load_config()
         self._load_fonts()
         self._build_frames()
+
+        # Trigger immediately when simulate_win is turned on via the web UI
+        if self.simulate_win and not was_simulating:
+            self._trigger_simulation()
+        # Cancel simulation when turned off
+        elif not self.simulate_win and was_simulating and self.celebrating:
+            self.celebrating = False
+            self.logger.info("Simulation cancelled")
+
         self.logger.info("Configuration updated")
 
     def get_info(self) -> Dict[str, Any]:

@@ -91,6 +91,11 @@
         }
       }
     },
+    "simulate_win": {
+      "type": "boolean",
+      "description": "Simulate a Cubs win for testing — activates the celebration immediately without waiting for a real game. Set back to false to cancel.",
+      "default": false
+    },
     "vegas_mode": {
       "type": "string",
       "description": "How this plugin appears in Vegas scroll mode. 'static' pauses the scroll while the flag displays (recommended). 'fixed' scrolls the flag by as a block.",
