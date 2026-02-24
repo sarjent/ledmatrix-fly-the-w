@@ -549,6 +549,9 @@ class FlyTheWPlugin(BasePlugin):
         Returns False when not celebrating so the display controller skips
         this plugin and advances to the next one in the rotation.
         """
+        # Check expiry here so the celebration window is honoured even if
+        # update() is not called (e.g. circuit breaker, scheduler gap).
+        self._check_expiry()
         if not self.celebrating:
             return False
 
