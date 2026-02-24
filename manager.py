@@ -12,7 +12,7 @@ API Version: 1.0.0
 
 import math
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -81,8 +81,17 @@ class FlyTheWPlugin(BasePlugin):
         self.last_update: Optional[datetime] = None
         self._win_info: Dict[str, Any] = {}        # cubs_abbr, opp_abbr, cubs_score, opp_score
 
+        # Schedule-aware polling: skip ESPN calls on days with no Cubs game.
+        # Reset automatically when the calendar date changes.
+        self._cubs_game_today: Optional[bool] = None   # None = unknown yet
+        self._cubs_game_date: Optional[date] = None    # date of last schedule check
+
         # Live-priority: fires once per new win, then lets normal rotation take over
         self._live_priority_fired: bool = False
+
+        # Signal the display controller to use high-FPS mode (125 Hz) so the
+        # GIF animation advances at the intended frame rate instead of 1 fps.
+        self.enable_scrolling: bool = True
 
         # Animation state
         self._frames: List[Image.Image] = []
@@ -391,6 +400,14 @@ class FlyTheWPlugin(BasePlugin):
             self._check_expiry()
             return
 
+        # Skip the API call entirely when we already know there is no Cubs
+        # game today.  The flag resets automatically the next calendar day.
+        today = datetime.now().date()
+        if self._cubs_game_today is False and self._cubs_game_date == today:
+            self.logger.debug("No Cubs game today (%s) — skipping ESPN poll", today)
+            self._check_expiry()
+            return
+
         # Throttle API calls to update_interval_seconds
         if self.last_update:
             elapsed = (datetime.now() - self.last_update).total_seconds()
@@ -421,21 +438,21 @@ class FlyTheWPlugin(BasePlugin):
         Sets self.celebrating = True and records win expiry when a new win
         is detected. Existing celebrations are NOT reset if no new win is
         found (the expiry window handles cleanup).
+
+        All Cubs events are inspected so that double-headers are handled
+        correctly — a win in game 2 is detected even if game 1 was already
+        processed.
         """
         events = data.get("events", [])
+        today = datetime.now().date()
+        cubs_game_exists = False   # set True as soon as any Cubs event is seen
+
         for event in events:
             competitions = event.get("competitions", [])
             if not competitions:
                 continue
 
             competition = competitions[0]
-            status = competition.get("status", {})
-            state = status.get("type", {}).get("state", "")
-
-            # Only care about completed games
-            if state != "post":
-                continue
-
             competitors = competition.get("competitors", [])
             home_team = next(
                 (c for c in competitors if c.get("homeAway") == "home"), None
@@ -449,12 +466,22 @@ class FlyTheWPlugin(BasePlugin):
 
             home_abbr = home_team.get("team", {}).get("abbreviation", "")
             away_abbr = away_team.get("team", {}).get("abbreviation", "")
-            home_score = int(home_team.get("score", 0) or 0)
-            away_score = int(away_team.get("score", 0) or 0)
 
             # Is this a Cubs game?
             if CUBS_ABBR not in (home_abbr, away_abbr):
                 continue
+
+            # At least one Cubs game is on today's schedule.
+            cubs_game_exists = True
+
+            # Only process completed games for win detection.
+            status = competition.get("status", {})
+            state = status.get("type", {}).get("state", "")
+            if state != "post":
+                continue
+
+            home_score = int(home_team.get("score", 0) or 0)
+            away_score = int(away_team.get("score", 0) or 0)
 
             # Did the Cubs win?
             if home_abbr == CUBS_ABBR:
@@ -474,7 +501,9 @@ class FlyTheWPlugin(BasePlugin):
             score_str = f"{cubs_score}-{opp_score}"
 
             # Only trigger a fresh celebration if we haven't already started one
-            # for this game result (avoid re-triggering on every poll).
+            # for this specific game result (avoid re-triggering on every poll).
+            # Each game in a double-header has a unique score string, so both
+            # wins are detected independently.
             if not self.celebrating or self.last_win_score != score_str:
                 self.celebrating = True
                 self.win_expires_at = datetime.now() + timedelta(
@@ -494,7 +523,14 @@ class FlyTheWPlugin(BasePlugin):
                     "Cubs win detected! %s %d – %s %d. Celebrating for %.1f hours.",
                     CUBS_ABBR, cubs_score, opp_abbr, opp_score, self.celebration_hours,
                 )
-            return  # Found the Cubs game; stop iterating
+            # Do NOT return here — continue scanning so a second game in a
+            # double-header is also evaluated.
+
+        # Update the schedule flag so update() can skip the API on no-game days.
+        self._cubs_game_today = cubs_game_exists
+        self._cubs_game_date = today
+        if not cubs_game_exists:
+            self.logger.info("No Cubs game found in today's MLB schedule (%s)", today)
 
     def _check_expiry(self) -> None:
         """Deactivate celebration if the configured window has passed."""
