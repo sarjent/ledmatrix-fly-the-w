@@ -431,6 +431,25 @@ class FlyTheWPlugin(BasePlugin):
         self.last_update = datetime.now()
         self._check_expiry()
 
+    @staticmethod
+    def _event_local_date(event_date_str: str) -> Optional[date]:
+        """
+        Parse an ESPN event date string (ISO-8601 UTC) to the local calendar
+        date.  Returns None if the string is absent or unparseable.
+
+        ESPN uses the format "2024-04-15T23:10:00Z".  datetime.fromisoformat()
+        in Python < 3.11 does not accept the "Z" suffix, so we normalise it to
+        "+00:00" before parsing.
+        """
+        if not event_date_str:
+            return None
+        try:
+            normalized = event_date_str.replace("Z", "+00:00")
+            event_dt = datetime.fromisoformat(normalized)
+            return event_dt.astimezone().date()
+        except (ValueError, TypeError):
+            return None
+
     def _process_scoreboard(self, data: Dict[str, Any]) -> None:
         """
         Scan today's MLB scoreboard for a final Cubs win.
@@ -450,6 +469,16 @@ class FlyTheWPlugin(BasePlugin):
         for event in events:
             competitions = event.get("competitions", [])
             if not competitions:
+                continue
+
+            # Skip any event whose local calendar date is before today.
+            # This prevents re-celebrating yesterday's win on restart or when
+            # ESPN continues serving a previous day's final on today's feed.
+            event_date = self._event_local_date(event.get("date", ""))
+            if event_date is not None and event_date < today:
+                self.logger.debug(
+                    "Skipping Cubs game from previous day (%s)", event_date
+                )
                 continue
 
             competition = competitions[0]
@@ -500,11 +529,12 @@ class FlyTheWPlugin(BasePlugin):
             # Build score string
             score_str = f"{cubs_score}-{opp_score}"
 
-            # Only trigger a fresh celebration if we haven't already started one
-            # for this specific game result (avoid re-triggering on every poll).
-            # Each game in a double-header has a unique score string, so both
-            # wins are detected independently.
-            if not self.celebrating or self.last_win_score != score_str:
+            # Trigger only for a score we have not already celebrated.
+            # Intentionally omits the "not self.celebrating" guard so that a
+            # celebration whose window has expired is never re-started for the
+            # same game result.  Each game in a double-header has a distinct
+            # score string, so both wins are detected independently.
+            if self.last_win_score != score_str:
                 self.celebrating = True
                 self.win_expires_at = datetime.now() + timedelta(
                     hours=self.celebration_hours
