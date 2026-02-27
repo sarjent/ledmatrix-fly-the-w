@@ -1,7 +1,7 @@
 {
   "id": "fly-the-w",
   "name": "Fly the W",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "Custom Plugin",
   "description": "Displays an animated Chicago Cubs 'W' flag celebration on the LED matrix when the Cubs win a game. Activates immediately after a game final and stays visible for a configurable duration (default 1 hour). Supports Vegas scroll mode.",
   "entry_point": "manager.py",
